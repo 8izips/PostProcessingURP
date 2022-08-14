@@ -1,0 +1,23 @@
+#pragma kernel GrayscaleCS
+
+Texture2D<float4> _SourceTex;
+RWTexture2D<float4> _ResultTex;
+
+float _Blend;
+
+float3 LinearToSRGB(float3 c)
+{
+	float3 sRGBLo = c * 12.92;
+	float3 sRGBHi = (pow(abs(c), float3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) * 1.055) - 0.055;
+	float3 sRGB = (c <= 0.0031308) ? sRGBLo : sRGBHi;
+	return sRGB;
+}
+
+[numthreads(8, 8, 1)]
+void GrayscaleCS(uint3 id : SV_DispatchThreadID)
+{
+	float4 color = _SourceTex[id.xy];
+	float luminance = dot(color.rgb, float3(0.2126729, 0.7151522, 0.0721750));
+	color.rgb = LinearToSRGB(lerp(color.rgb, luminance.xxx, _Blend.xxx));
+	_ResultTex[id.xy] = color;
+}
