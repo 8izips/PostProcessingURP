@@ -1,23 +1,35 @@
 #pragma kernel GrayscaleCS
+#pragma kernel GrayscaleCSArray
 
 Texture2D<float4> _SourceTex;
 RWTexture2D<float4> _ResultTex;
-
+Texture2DArray<float4> _SourceArray;
+RWTexture2DArray<float4> _ResultArray;
 float _Blend;
+float4 _TextureSize;
 
-float3 LinearToSRGB(float3 c)
+float4 Grayscale(float4 color)
 {
-	float3 sRGBLo = c * 12.92;
-	float3 sRGBHi = (pow(abs(c), float3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) * 1.055) - 0.055;
-	float3 sRGB = (c <= 0.0031308) ? sRGBLo : sRGBHi;
-	return sRGB;
+    float luminance = dot(color.rgb, float3(0.2126729, 0.7151522, 0.0721750));
+    color.rgb = lerp(color.rgb, luminance.xxx, _Blend);
+    // Keep linear HDR values. The render target/output pipeline owns color encoding.
+    return color;
 }
 
 [numthreads(8, 8, 1)]
 void GrayscaleCS(uint3 id : SV_DispatchThreadID)
 {
-	float4 color = _SourceTex[id.xy];
-	float luminance = dot(color.rgb, float3(0.2126729, 0.7151522, 0.0721750));
-	color.rgb = LinearToSRGB(lerp(color.rgb, luminance.xxx, _Blend.xxx));
-	_ResultTex[id.xy] = color;
+    uint width, height;
+    _ResultTex.GetDimensions(width, height);
+    if (id.x >= width || id.y >= height || any(id.xy >= (uint2)_TextureSize.xy)) return;
+    _ResultTex[id.xy] = Grayscale(_SourceTex.Load(int3(id.xy, 0)));
+}
+
+[numthreads(8, 8, 1)]
+void GrayscaleCSArray(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height, slices;
+    _ResultArray.GetDimensions(width, height, slices);
+    if (id.x >= width || id.y >= height || id.z >= slices || any(id >= (uint3)_TextureSize.xyz)) return;
+    _ResultArray[id] = Grayscale(_SourceArray.Load(int4(id, 0)));
 }

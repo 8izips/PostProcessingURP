@@ -1,48 +1,46 @@
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
 
 public class AnalogGlitchRenderFeature : CustomRenderFeature<AnalogGlitch>
 {
-	protected override CustomPass<AnalogGlitch> CreatePass(RenderPassEvent renderPassEvent)
-	{
-		return new AnalogGlitchPass(renderPassEvent);
-	}
+
+    protected override CustomPass<AnalogGlitch> CreatePass(RenderPassEvent renderPassEvent)
+    {
+        return new AnalogGlitchPass(renderPassEvent);
+    }
 }
 
 public class AnalogGlitchPass : CustomPass<AnalogGlitch>
 {
-	public override string GetShaderPath() => "Hidden/PostProcessing/AnalogGlitch";
-	public override string renderTag => "Render AnalogGlitch Effects";
+    public override string GetShaderPath() => "Hidden/PostProcessing/AnalogGlitch";
+    public override string renderTag => "Render AnalogGlitch Effects";
+    public AnalogGlitchPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
 
-	public AnalogGlitchPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
+    protected override void ConfigureParameters(PostProcessingParameters p, AnalogGlitch c, UniversalCameraData camera)
+    {
+        int id = camera.camera.GetInstanceID();
+        if (!phases.TryGetValue(id, out var phase))
+        {
+            phase = new Phase();
+            phases.Add(id, phase);
+        }
+        if (phase.frame != Time.frameCount)
+        {
+            phase.time += Time.deltaTime * c.verticalJump.value * 11.3f;
+            phase.frame = Time.frameCount;
+        }
+        float threshold = Mathf.Clamp01(1f - c.scanLineJitter.value * 1.2f);
+        float displacement = 0.002f + Mathf.Pow(c.scanLineJitter.value, 3) * 0.05f;
+        p.Vector("_ScanLineJitter", new Vector4(displacement, threshold, 0, 0));
+        p.Vector("_VerticalJump", new Vector4(c.verticalJump.value, phase.time, 0, 0));
+        p.Float("_HorizontalShake", c.horizontalShake.value * 0.2f);
+        p.Vector("_ColorDrift", new Vector4(c.colorDrift.value * 0.04f, Time.time * 606.11f, 0, 0));
+    }
 
-	static class ShaderPropertyID
-	{
-		internal static readonly int MainTex = Shader.PropertyToID("_MainTex");
+    sealed class Phase { public float time; public int frame = -1; }
+    readonly System.Collections.Generic.Dictionary<int, Phase> phases = new System.Collections.Generic.Dictionary<int, Phase>();
+    public override void Release() { phases.Clear(); base.Release(); }
 
-		internal static readonly int ScanLineJitter = Shader.PropertyToID("_ScanLineJitter");
-		internal static readonly int VerticalJump = Shader.PropertyToID("_VerticalJump");
-		internal static readonly int HorizontalShake = Shader.PropertyToID("_HorizontalShake");
-		internal static readonly int ColorDrift = Shader.PropertyToID("_ColorDrift");
-	}
-
-	float verticalJumpTime;
-	protected override void Render(CommandBuffer cmd, ref RenderingData renderingData)
-	{
-		verticalJumpTime += Time.deltaTime * volumeComponent.verticalJump.value * 11.3f;
-
-		var sl_thresh = Mathf.Clamp01(1.0f - volumeComponent.scanLineJitter.value * 1.2f);
-		var sl_disp = 0.002f + Mathf.Pow(volumeComponent.scanLineJitter.value, 3) * 0.05f;
-		var vj = new Vector2(volumeComponent.verticalJump.value, verticalJumpTime);
-		var cd = new Vector2(volumeComponent.colorDrift.value * 0.04f, Time.time * 606.11f);
-
-		material.SetVector(ShaderPropertyID.ScanLineJitter, new Vector2(sl_disp, sl_thresh));
-		material.SetVector(ShaderPropertyID.VerticalJump, vj);
-		material.SetFloat(ShaderPropertyID.HorizontalShake, volumeComponent.horizontalShake.value * 0.2f);
-		material.SetVector(ShaderPropertyID.ColorDrift, cd);
-
-		cmd.SetGlobalTexture(ShaderPropertyID.MainTex, source);
-		cmd.Blit(source, destination, material);
-	}
 }

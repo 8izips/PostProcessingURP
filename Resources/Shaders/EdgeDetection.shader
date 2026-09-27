@@ -1,107 +1,57 @@
-﻿Shader "Hidden/PostProcessing/EdgeDetection"
+Shader "Hidden/PostProcessing/EdgeDetection"
 {
-	HLSLINCLUDE
-	#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareNormalsTexture.hlsl"
-	#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+    HLSLINCLUDE
+    #include "Common.hlsl"
 
-	Texture2D _MainTex;
-	float4 _MainTex_TexelSize;
+    #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+    #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareNormalsTexture.hlsl"
+    float _Intensity, _Thickness;
+    float4 _Threshold;
+    float3 _Color;
+    float4 DepthNormal(float2 uv)
+    {
+        uv=saturate(uv);
+        // URP owns normal encoding, including _GBUFFER_NORMALS_OCT.
+        return float4(SampleSceneNormals(uv), max(PPEyeDepth(SampleSceneDepth(uv)),1e-5));
+    }
+    float4 Frag(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        const float2 offsets[8]={float2(-1,-1),float2(-1,0),float2(-1,1),float2(0,-1),
+            float2(0,1),float2(1,-1),float2(1,0),float2(1,1)};
+        float4 center=DepthNormal(i.texcoord);
+        float4 sum=0; float weight=0;
+        [unroll] for (int j=0;j<8;j++)
+        {
+            float4 sampleValue=DepthNormal(i.texcoord+offsets[j]*_MainTex_TexelSize.xy*_Thickness);
+            sum+=sampleValue/sampleValue.w;
+            weight+=rcp(sampleValue.w);
+        }
+        sum/=max(weight,1e-5);
+        sum.xyz*=rsqrt(max(dot(sum.xyz,sum.xyz),1e-12));
+        float normalSame=saturate((dot(center.xyz,sum.xyz)-_Threshold.x)/max(_Threshold.y-_Threshold.x,1e-5));
+        normalSame=normalSame*normalSame*(3-2*normalSame);
+        float depthEdge=saturate((abs(center.w-sum.w)-_Threshold.z*center.w)/max((_Threshold.w-_Threshold.z)*center.w,1e-5));
+        depthEdge=depthEdge*depthEdge*(3-2*depthEdge);
+        float4 color=SampleMain(i.texcoord);
+        color.rgb=lerp(color.rgb,_Color,(1-normalSame*(1-depthEdge))*_Intensity);
+        return color;
+    }
 
-	// The blending factor for the edges with the original color
-	float _Intensity;
-	// The threshold ranges for edge detection (xy used for normals, zw used for depth)
-	float4 _Threshold;
-	// The thickness of the edge (determines how far the neighbour samples spread around the center sample)
-	float _Thickness;
-	// The color of the edge
-	float3 _Color;
-
-	// Curtom Scene normal and depth sampling function to read from a custom texture and sampler
-	float3 SampleSceneNormals(float2 uv, TEXTURE2D_X_FLOAT(_Texture), SAMPLER(sampler_Texture))
-	{
-		return UnpackNormalOctRectEncode(SAMPLE_TEXTURE2D_X(_Texture, sampler_Texture, UnityStereoTransformScreenSpaceTex(uv)).xy) * float3(1.0, 1.0, -1.0);
-	}
-
-	float SampleSceneDepth(float2 uv, TEXTURE2D_X_FLOAT(_Texture), SAMPLER(sampler_Texture))
-	{
-		return SAMPLE_TEXTURE2D_X(_Texture, sampler_Texture, UnityStereoTransformScreenSpaceTex(uv)).r;
-	}
-
-	// A Bilinear sampler to allow for subpixel thickness for the edge 
-	SAMPLER(sampler_linear_clamp);
-
-	// Sample normal & depth and combine them to a single 4D vector (xyz for normal, w for depth)
-	float4 SampleSceneDepthNormal(float2 uv){
-		float depth = SampleSceneDepth(uv, _CameraDepthTexture, sampler_linear_clamp);
-		float depthEye = LinearEyeDepth(depth, _ZBufferParams);
-		float3 normal = SampleSceneNormals(uv, _CameraNormalsTexture, sampler_linear_clamp);
-		return float4(normal, depthEye);
-	}
-
-	// Read the 8 surrounding samples and average them with perspective correction
-	// The perspective correction helps when the surface normal is almost orthogonal to the view direction
-	float4 SampleNeighborhood(float2 uv, float thickness){
-		// The surrounding pixel offsets
-		const float2 offsets[8] = {
-			float2(-1, -1),
-			float2(-1, 0),
-			float2(-1, 1),
-			float2(0, -1),
-			float2(0, 1),
-			float2(1, -1),
-			float2(1, 0),
-			float2(1, 1)
-		};
-		
-		float2 delta = _MainTex_TexelSize.xy * thickness;
-		float4 sum = 0;
-		float weight = 0;
-		for(int i=0; i<8; i++){
-			float4 sample = SampleSceneDepthNormal(uv + delta * offsets[i]);
-			// The sum is weight by 1/depth for perspecive correction
-			sum += sample / sample.w;
-			weight += 1/sample.w;
-		}
-		sum /= weight;
-		// Doesn't make a visible difference but it feels more correct
-		// May remove it for performance benefits
-		sum.xyz = normalize(sum.xyz);
-		return sum;
-	}
-
-	#include "Common.hlsl"
-
-	float4 Frag(v2f input) : SV_Target
-	{
-		UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
-
-		float2 uv = UnityStereoTransformScreenSpaceTex(input.texcoord);
-		float4 color = LOAD_TEXTURE2D_X(_MainTex, uv * _ScreenSize.xy);
-		
-		float4 center = SampleSceneDepthNormal(uv);
-		float4 neighborhood = SampleNeighborhood(uv,  _Thickness);
-		// Normal similarity is calculated using a dot product
-		float normalSame = smoothstep(_Threshold.x, _Threshold.y, dot(center.xyz, neighborhood.xyz));
-		// Depth similarity is calculated using absolute difference
-		float depthSame = smoothstep(_Threshold.w * center.w, _Threshold.z * center.w, abs(center.w - neighborhood.w));
-		// Combine normal and depth sameness to get edge factor
-		float edge = 1 - normalSame * depthSame;
-
-		color.rgb = lerp(color.rgb, _Color, edge * _Intensity);
-		return color;
-	}
-	ENDHLSL
-
-	SubShader
-	{
-		Cull Off ZWrite Off ZTest Always
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment Frag
-			ENDHLSL
-		}
-	}
-	Fallback Off
+    ENDHLSL
+    SubShader
+    {
+        Tags { "RenderPipeline" = "UniversalPipeline" }
+        Cull Off ZWrite Off ZTest Always
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
+            #pragma vertex Vert
+            #pragma fragment Frag
+            ENDHLSL
+        }
+    }
 }

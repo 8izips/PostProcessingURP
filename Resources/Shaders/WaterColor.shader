@@ -1,135 +1,72 @@
 Shader "Hidden/PostProcessing/WaterColor"
 {
-	HLSLINCLUDE
-	Texture2D _MainTex;
-	SamplerState sampler_MainTex;
-	Texture2D _NoiseTex;
-	SamplerState sampler_NoiseTex;
-	float4 _EffectParams;
-	float _Interval;
-	int _Iteration;
-	
-	float4 _EdgeColor;
-	float4 _FillColor;
+    HLSLINCLUDE
+    #include "Common.hlsl"
 
-	float edgeContrast;
-	float blurWidth;
-	float blurFrequency;
-	float hueShift;
-	float iterationRcp;
+    #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
+    TEXTURE2D(_NoiseTex);
+    SAMPLER(sampler_NoiseTex);
+    float4 _EffectParams, _EdgeColor, _FillColor;
+    float _Interval;
+    int _Iteration;
+    float3 Noise(float2 uv) { return SAMPLE_TEXTURE2D_LOD(_NoiseTex,sampler_NoiseTex,uv,0).rgb; }
+    float Luma(float2 uv) { return Luminance(SampleMain(uv).rgb); }
+    float2 Gradient(float2 uv,float frequency)
+    {
+        float2 dx=float2(_Interval/200,0);
+        return float2(Luma(uv+dx)-Luma(uv-dx),Luma(uv+dx.yx)-Luma(uv-dx.yx))+(Noise(uv*0.4*frequency).gb-0.5)*0.05;
+    }
+    float ProcessEdge(inout float2 uv,float stride)
+    {
+        float2 gradient=Gradient(uv,1);
+        float edge=saturate(length(gradient)*10);
+        float pattern=Noise(uv*0.8).r;
+        uv+=PPSafeNormalize(gradient.yx*float2(-1,1))*stride;
+        return pattern*edge;
+    }
+    float3 ProcessFill(inout float2 uv,float stride)
+    {
+        uv+=PPSafeNormalize(Gradient(uv,_EffectParams.z))*stride;
+        float shift=Noise(uv*0.1).r*2;
+        return SampleMain(uv).rgb*HsvToRgb(float3(shift,_EffectParams.w,1));
+    }
+    float4 Frag(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        int count=clamp(_Iteration,1,128);
+        float reciprocal=rcp((float)count), stride=0.04*reciprocal;
+        float2 en=i.texcoord, ep=i.texcoord, cn=i.texcoord, cp=i.texcoord;
+        float edge=0, edgeWeight=0, colorWeight=0;
+        float3 color=0;
+        [loop] for (int j=0;j<count;j++)
+        {
+            float we=1.5-j*reciprocal, wc=0.2+j*reciprocal;
+            edge+=(ProcessEdge(en,-stride)+ProcessEdge(ep,stride))*we;
+            edgeWeight+=we*2;
+            color+=(ProcessFill(cn,-stride*_EffectParams.y)+ProcessFill(cp,stride*_EffectParams.y)*0.3)*wc;
+            colorWeight+=wc*1.3;
+        }
+        edge=saturate((edge/max(edgeWeight,1e-5)-0.5)*_EffectParams.x+0.5);
+        color/=max(colorWeight,1e-5);
+        float3 edges=lerp(1,_EdgeColor.rgb,_EdgeColor.a*edge);
+        float3 fill=lerp(1,color,_FillColor.a)*_FillColor.rgb;
+        return float4(edges*fill,SampleMain(i.texcoord).a);
+    }
 
-	#include "Common.hlsl"
-	#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
+    ENDHLSL
+    SubShader
+    {
+        Tags { "RenderPipeline" = "UniversalPipeline" }
+        Cull Off ZWrite Off ZTest Always
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment Frag
 
-	float2 Rotate90(float2 v)
-	{
-		return v.yx * float2(-1, 1);
-	}
-
-	// Texture sampling functions
-	float3 SampleColor(float2 p)
-	{
-		return _MainTex.Sample(sampler_MainTex, p).rgb;
-	}
-
-	float SampleLuminance(float2 p)
-	{
-		return Luminance(SampleColor(p));
-	}
-
-	float3 SampleNoise(float2 p)
-	{
-		return _NoiseTex.Sample(sampler_NoiseTex, p).rgb;
-	}
-
-	float2 GetGradient(float2 p, float freq)
-	{
-		const float2 dx = float2(_Interval / 200, 0);
-		float ldx = SampleLuminance(p + dx.xy) - SampleLuminance(p - dx.xy);
-		float ldy = SampleLuminance(p + dx.yx) - SampleLuminance(p - dx.yx);
-		float2 n = SampleNoise(p * 0.4 * freq).gb - 0.5;
-		return float2(ldx, ldy) + n * 0.05;
-	}
-
-	// Edge / fill processing functions
-	float ProcessEdge(inout float2 p, float stride)
-	{
-		float2 grad = GetGradient(p, 1);
-		float edge = saturate(length(grad) * 10);
-		float pattern = SampleNoise(p * 0.8).r;
-		p += normalize(Rotate90(grad)) * stride;
-		return pattern * edge;
-	}
-
-	float3 ProcessFill(inout float2 p, float stride)
-	{
-		float2 grad = GetGradient(p, blurFrequency);
-		p += normalize(grad) * stride;
-		float shift = SampleNoise(p * 0.1).r * 2;
-		return SampleColor(p) * HsvToRgb(float3(shift, hueShift, 1));
-	}
-
-	float3 Process(float2 uv)
-	{
-		float2 p_e_n = uv;
-		float2 p_e_p = uv;
-		float2 p_c_n = uv;
-		float2 p_c_p = uv;
-
-		const float Stride = 0.04 * iterationRcp;
-
-		float  acc_e = 0;
-		float3 acc_c = 0;
-		float  sum_e = 0;
-		float  sum_c = 0;
-
-		for (int i = 0; i < _Iteration; i++)
-		{
-			float w_e = 1.5 - i * iterationRcp;
-			acc_e += ProcessEdge(p_e_n, -Stride) * w_e;
-			acc_e += ProcessEdge(p_e_p, +Stride) * w_e;
-			sum_e += w_e * 2;
-
-			float w_c = 0.2 + i * iterationRcp;
-			acc_c += ProcessFill(p_c_n, -Stride * blurWidth) * w_c;
-			acc_c += ProcessFill(p_c_p, +Stride * blurWidth) * w_c * 0.3;
-			sum_c += w_c * 1.3;
-		}
-
-		// Normalization and contrast
-		acc_e /= sum_e;
-		acc_c /= sum_c;		
-		acc_e = saturate((acc_e - 0.5) * edgeContrast + 0.5);
-
-		// Color blending
-		float3 rgb_e = lerp(1, _EdgeColor.rgb, _EdgeColor.a * acc_e);
-		float3 rgb_f = lerp(1, acc_c, _FillColor.a) * _FillColor.rgb;
-
-		return rgb_e * rgb_f;
-	}
-
-	float4 Frag(v2f i) : SV_Target
-	{
-		edgeContrast = _EffectParams.x;
-		blurWidth = _EffectParams.y;
-		blurFrequency = _EffectParams.z;
-		hueShift = _EffectParams.w;
-		iterationRcp = 1.0 / _Iteration;
-
-		return float4(Process(i.texcoord), 1);
-	}
-	ENDHLSL
-
-	SubShader
-	{
-		Cull Off ZWrite Off ZTest Always
-
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment Frag
-			ENDHLSL
-		}
-	}
+            ENDHLSL
+        }
+    }
 }

@@ -1,71 +1,50 @@
-﻿Shader "Hidden/PostProcessing/AdaptiveFog"
+Shader "Hidden/PostProcessing/AdaptiveFog"
 {
-	HLSLINCLUDE
-	Texture2D _MainTex;
-	SamplerState sampler_MainTex;
-	float4 _MainTex_TexelSize;
+    HLSLINCLUDE
+    #include "Common.hlsl"
 
-	float _BloomThreshold;
-	float _BloomPower;
-	float _BloomWidth;
-	float4 _FogColor;
-	float _MaxFogFactor;
-	float _FogCurve;
-	float _FogStart;
+    #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+    float _BloomThreshold, _BloomPower, _BloomWidth, _MaxFogFactor, _FogCurve, _FogStart;
+    float4 _FogColor;
+    float4 Frag(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        float4 color=SampleMain(i.texcoord);
+        float depth=PPEyeDepth(SampleSceneDepth(i.texcoord));
+        float fog=clamp(saturate(depth-_FogStart)*_FogCurve,0,max(0,_MaxFogFactor));
+        if (fog<=0) return color;
+        float3 blur=0;
+        float width=max(_BloomWidth,1e-4);
+        // Pixel offsets must not depend on the screen position (UV).
+        float2 stepUV=_MainTex_TexelSize.xy*width;
+        [unroll] for (int x=0;x<5;x++)
+            [unroll] for (int y=0;y<5;y++)
+            {
+                float2 offset=float2(2.5-x,-2.5+y);
+                float distanceWeight=saturate(sqrt(dot(offset,offset)/8.0));
+                blur+=lerp(SampleMain(i.texcoord+offset*stepUV).rgb,color.rgb,distanceWeight);
+            }
+        blur/=max(1e-4,25-(_BloomPower-_BloomThreshold*5));
+        float amount=saturate(dot(color.rgb,float3(0.299,0.587,0.114)));
+        float3 bloom=lerp(color.rgb,blur*(_BloomPower+4),amount);
+        color.rgb=lerp(color.rgb,lerp(bloom,_FogColor.rgb,fog),fog);
+        return color; // Preserve input alpha and HDR values; no whole-screen saturate.
+    }
 
-	#include "Common.hlsl"
-	#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+    ENDHLSL
+    SubShader
+    {
+        Tags { "RenderPipeline" = "UniversalPipeline" }
+        Cull Off ZWrite Off ZTest Always
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment Frag
 
-	float4 Frag(v2f i) : SV_Target
-	{
-		float4 color = _MainTex.Sample(sampler_MainTex, i.texcoord);
-		float depth = LinearEyeDepth(SampleSceneDepth(i.texcoord), _ZBufferParams);
-
-		float3 blurColor2 = 0;
-		float3 blurtemp = 0;
-		const float maxDistance = 8 * _BloomWidth;
-		float curDistance = 0;
-		const float sampleCount = 25.0;
-		const float2 blurtempvalue = i.texcoord * _MainTex_TexelSize.xy * _BloomWidth;
-		float2 bloomSample = float2(2.5, -2.5);
-		float2 bloomSampleValue = float2(0, 0);
-
-		for (bloomSample.x = (2.5); bloomSample.x > -2.0; bloomSample.x = bloomSample.x - 1.0)
-		{
-			bloomSampleValue.x = bloomSample.x * blurtempvalue.x;
-			float2 distancetemp = bloomSample.x * bloomSample.x * _BloomWidth;
-
-			for (bloomSample.y = (-2.5); bloomSample.y < 2.0; bloomSample.y = bloomSample.y + 1.0)
-			{
-				distancetemp.y = bloomSample.y * bloomSample.y;
-				curDistance = (distancetemp.y * _BloomWidth) + distancetemp.x;
-				bloomSampleValue.y = bloomSample.y * blurtempvalue.y;
-				blurtemp = _MainTex.Sample(sampler_MainTex, i.texcoord + bloomSampleValue).rgb;
-				blurColor2.rgb += lerp(blurtemp.rgb, color.rgb, sqrt(curDistance / maxDistance));
-			}
-		}
-		blurColor2.rgb = (blurColor2.rgb / (sampleCount - (_BloomPower - _BloomThreshold * 5)));
-
-		float bloomAmount = (dot(color.rgb, float3(0.299f, 0.587f, 0.114f)));
-		float4 blurColor = float4(blurColor2.rgb * (_BloomPower + 4.0), 1.0);
-		blurColor = saturate(lerp(color, blurColor, bloomAmount));
-
-		float fogFactor = clamp(saturate(depth - _FogStart) * _FogCurve, 0.0, _MaxFogFactor);
-
-		return saturate(lerp(color, lerp(blurColor, _FogColor, fogFactor), fogFactor));
-	}
-	ENDHLSL
-
-	SubShader
-	{
-		Cull Off ZWrite Off ZTest Always
-
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment Frag
-			ENDHLSL
-		}
-	}
+            ENDHLSL
+        }
+    }
 }

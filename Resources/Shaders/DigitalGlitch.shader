@@ -1,47 +1,41 @@
-﻿Shader "Hidden/PostProcessing/DigitalGlitch"
+Shader "Hidden/PostProcessing/DigitalGlitch"
 {
-	HLSLINCLUDE
-	Texture2D _MainTex;
-	SamplerState sampler_MainTex;
-	Texture2D _NoiseTex;
-	SamplerState sampler_NoiseTex;
-	Texture2D _TrashTex;
-	SamplerState sampler_TrashTex;
+    HLSLINCLUDE
+    #include "Common.hlsl"
 
-	float _Intensity;
+    TEXTURE2D(_NoiseTex);
+    SAMPLER(sampler_NoiseTex);
+    PP_DECLARE_TEXTURE(_TrashTex);
+    float _Intensity;
+    float4 Frag(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        float4 glitch = SAMPLE_TEXTURE2D_LOD(_NoiseTex, sampler_NoiseTex, i.texcoord, 0);
+        float threshold = 1.001 - _Intensity * 1.001;
+        float wd = step(threshold, pow(abs(glitch.z), 2.5));
+        float wf = step(threshold, pow(abs(glitch.w), 2.5));
+        float wc = step(threshold, pow(abs(glitch.z), 3.5));
+        float2 uv = frac(i.texcoord + glitch.xy * wd);
+        float4 source = SampleMain(uv);
+        float3 color = lerp(source.rgb, PP_SAMPLE_TEXTURE(_TrashTex, uv).rgb, wf);
+        float3 negative = saturate(color.grb + (1 - dot(color, float3(1,1,1))) * 0.5);
+        return float4(lerp(color, negative, wc), source.a);
+    }
 
-	#include "Common.hlsl"
+    ENDHLSL
+    SubShader
+    {
+        Tags { "RenderPipeline" = "UniversalPipeline" }
+        Cull Off ZWrite Off ZTest Always
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment Frag
 
-	float4 Frag(v2f i) : SV_Target
-	{
-		float4 glitch = _NoiseTex.Sample(sampler_NoiseTex, i.texcoord);
-
-		float thresh = 1.001 - _Intensity * 1.001;
-		float w_d = step(thresh, pow(abs(glitch.z), 2.5));
-		float w_f = step(thresh, pow(abs(glitch.w), 2.5));
-		float w_c = step(thresh, pow(abs(glitch.z), 3.5));
-
-		float2 uv = frac(i.texcoord + glitch.xy * w_d);
-		float4 source = _MainTex.Sample(sampler_MainTex, uv);
-		float4 trash = _TrashTex.Sample(sampler_TrashTex, uv);
-		float3 color = lerp(source, trash, w_f).rgb;
-		float3 neg = saturate(color.grb + (1 - dot(color, 1)) * 0.5);
-		color = lerp(color, neg, w_c);
-
-		return float4(color, source.a);
-	}
-	ENDHLSL
-
-	SubShader
-	{
-		Cull Off ZWrite Off ZTest Always
-
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment Frag
-			ENDHLSL
-		}
-	}
+            ENDHLSL
+        }
+    }
 }

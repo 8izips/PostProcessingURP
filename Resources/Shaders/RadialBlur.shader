@@ -1,43 +1,34 @@
-﻿Shader "Hidden/PostProcessing/RadialBlur"
+Shader "Hidden/PostProcessing/RadialBlur"
 {
-	HLSLINCLUDE
-	Texture2D _MainTex;
-	SamplerState sampler_MainTex;
-	
-	float _BlurRadius;
-	float _Iteration;
-	float _RadialCenterX;
-	float _RadialCenterY;
+    HLSLINCLUDE
+    #include "Common.hlsl"
 
-	#include "Common.hlsl"
+    float _BlurRadius, _RadialCenterX, _RadialCenterY;
+    int _Iteration;
+    float4 Frag(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        float2 delta = (float2(_RadialCenterX,_RadialCenterY)-i.texcoord)*_BlurRadius;
+        float4 color = 0;
+        int count = max(1,_Iteration);
+        [loop] for (int j=0; j<count; j++) color += SampleMain(i.texcoord+delta*j);
+        return color/count;
+    }
 
-	float4 Frag(v2f i) : SV_Target
-	{
-		float2 center = float2(_RadialCenterX, _RadialCenterY);
-		float2 blurVector = (center - i.texcoord.xy) * _BlurRadius;
-		float4 stackedColor = float4(0, 0, 0, 0);
+    ENDHLSL
+    SubShader
+    {
+        Tags { "RenderPipeline" = "UniversalPipeline" }
+        Cull Off ZWrite Off ZTest Always
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment Frag
 
-		[unroll(30)]
-		for (int c = 0; c < _Iteration; c++)
-		{
-			stackedColor += _MainTex.Sample(sampler_MainTex, i.texcoord);
-			i.texcoord.xy += blurVector;
-		}
-
-		return stackedColor / _Iteration;
-	}
-	ENDHLSL
-
-	SubShader
-	{
-		Cull Off ZWrite Off ZTest Always
-
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment Frag
-			ENDHLSL
-		}
-	}
+            ENDHLSL
+        }
+    }
 }

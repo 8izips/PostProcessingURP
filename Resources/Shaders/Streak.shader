@@ -1,119 +1,85 @@
-﻿Shader "Hidden/PostProcessing/Streak"
+Shader "Hidden/PostProcessing/Streak"
 {
-	HLSLINCLUDE
-	Texture2D _MainTex;
-	SamplerState sampler_MainTex;
-	Texture2D _HighTex;
-	SamplerState sampler_HighTex;
+    HLSLINCLUDE
+    #include "Common.hlsl"
 
-	float4 _MainTex_TexelSize;
-	float _Threshold;
-	float _Stretch;
-	float _Intensity;
-	half3 _Color;
+    PP_DECLARE_TEXTURE(_HighTex);
+    float _Threshold, _Stretch, _Intensity;
+    float3 _Color;
+    float4 FragPrefilter(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        float dy=_MainTex_TexelSize.y*0.75;
+        float3 color=(SampleMain(i.texcoord+float2(0,-dy)).rgb+SampleMain(i.texcoord+float2(0,dy)).rgb)*0.5;
+        float brightness=max(color.r,max(color.g,color.b));
+        color*=max(0,brightness-_Threshold)/max(brightness,1e-5);
+        return float4(color,1);
+    }
+    float4 FragDownsample(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        float dx=_MainTex_TexelSize.x*1.25;
+        float3 sum=0;
+        [unroll] for (int j=-5;j<=5;j+=2) sum+=SampleMain(i.texcoord+float2(dx*j,0)).rgb;
+        return float4(sum/6,1);
+    }
+    float4 FragUpsample(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        return float4(lerp(PP_SAMPLE_TEXTURE(_HighTex,i.texcoord).rgb,SampleMain(i.texcoord).rgb,_Stretch),1);
+    }
+    float4 FragComposition(v2f i) : SV_Target
+    {
+        UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        float4 original=PP_SAMPLE_TEXTURE(_HighTex,i.texcoord);
+        original.rgb+=SampleMain(i.texcoord).rgb*_Color*_Intensity*5;
+        return original;
+    }
 
-	#include "Common.hlsl"
-	#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+    ENDHLSL
+    SubShader
+    {
+        Tags { "RenderPipeline" = "UniversalPipeline" }
+        Cull Off ZWrite Off ZTest Always
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment FragPrefilter
 
-	// Prefilter: Shrink horizontally and apply threshold.
-	half4 FragPrefilter(v2f i) : SV_Target
-	{
-		// Actually this should be 1, but we assume you need more blur...
-		const float vscale = 1.5;
-		const float dy = _MainTex_TexelSize.y * vscale / 2;
+            ENDHLSL
+        }
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment FragDownsample
 
-		float2 uv = i.texcoord;
-		half3 c0 = _MainTex.Sample(sampler_MainTex, float2(uv.x, uv.y - dy)).rgb;
-		half3 c1 = _MainTex.Sample(sampler_MainTex, float2(uv.x, uv.y + dy)).rgb;
-		half3 c = (c0 + c1) / 2;
+            ENDHLSL
+        }
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment FragUpsample
 
-		float br = max(c.r, max(c.g, c.b));
-		c *= max(0, br - _Threshold) / max(br, 1e-5);
+            ENDHLSL
+        }
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.5
+            #pragma multi_compile _ STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+            #pragma vertex Vert
+            #pragma fragment FragComposition
 
-		return half4(c, 1);
-	}
-
-	// Downsampler
-	half4 FragDownsample(v2f i) : SV_Target
-	{
-		// Actually this should be 1, but we assume you need more blur...
-		const float hscale = 1.25;
-		const float dx = _MainTex_TexelSize.x * hscale;
-
-		float2 uv = i.texcoord;
-		float u0 = uv.x - dx * 5;
-		float u1 = uv.x - dx * 3;
-		float u2 = uv.x - dx * 1;
-		float u3 = uv.x + dx * 1;
-		float u4 = uv.x + dx * 3;
-		float u5 = uv.x + dx * 5;
-
-		half3 c0 = _MainTex.Sample(sampler_MainTex, float2(u0, uv.y)).rgb;
-		half3 c1 = _MainTex.Sample(sampler_MainTex, float2(u1, uv.y)).rgb;
-		half3 c2 = _MainTex.Sample(sampler_MainTex, float2(u2, uv.y)).rgb;
-		half3 c3 = _MainTex.Sample(sampler_MainTex, float2(u3, uv.y)).rgb;
-		half3 c4 = _MainTex.Sample(sampler_MainTex, float2(u4, uv.y)).rgb;
-		half3 c5 = _MainTex.Sample(sampler_MainTex, float2(u5, uv.y)).rgb;
-
-		// Simple box filter
-		half3 c = (c0 + c1 + c2 + c3 + c4 + c5) / 6;
-
-		return half4(c, 1);
-	}
-
-	// Upsampler
-	half4 FragUpsample(v2f i) : SV_Target
-	{
-		half3 c0 = _MainTex.Sample(sampler_MainTex, i.texcoord).rgb / 4;
-		half3 c1 = _MainTex.Sample(sampler_MainTex, i.texcoord).rgb / 2;
-		half3 c2 = _MainTex.Sample(sampler_MainTex, i.texcoord).rgb / 4;
-		half3 c3 = _HighTex.Sample(sampler_HighTex, i.texcoord).rgb;
-		return half4(lerp(c3, c0 + c1 + c2, _Stretch), 1);
-	}
-
-	// Final composition
-	half4 FragComposition(v2f i) : SV_Target
-	{
-		half3 c0 = _MainTex.Sample(sampler_MainTex, i.texcoord).rgb / 4;
-		half3 c1 = _MainTex.Sample(sampler_MainTex, i.texcoord).rgb / 2;
-		half3 c2 = _MainTex.Sample(sampler_MainTex, i.texcoord).rgb / 4;
-		half3 c3 = _HighTex.Sample(sampler_HighTex, i.texcoord).rgb;
-		half3 cf = (c0 + c1 + c2) * _Color * _Intensity * 5;
-		return half4(cf + c3, 1);
-	}
-
-	ENDHLSL
-
-	SubShader
-	{
-		Cull Off ZWrite Off ZTest Always
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment FragPrefilter
-			ENDHLSL
-		}
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment FragDownsample
-			ENDHLSL
-		}
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment FragUpsample
-			ENDHLSL
-		}
-		Pass
-		{
-			HLSLPROGRAM
-			#pragma vertex Vert
-			#pragma fragment FragComposition
-			ENDHLSL
-		}
-	}
+            ENDHLSL
+        }
+    }
 }

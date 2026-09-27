@@ -1,69 +1,96 @@
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
 
 public class GrayscaleCSRenderFeature : CustomRenderFeature<GrayscaleCS>
 {
-	[SerializeField]
-	ComputeShader shader;
-
-	protected override CustomPass<GrayscaleCS> CreatePass(RenderPassEvent renderPassEvent)
-	{
-		settings.renderPassEvent = RenderPassEvent.BeforeRenderingPostProcessing;
-
-		var pass = new GrayscaleCSPass(settings.renderPassEvent);
-		pass.computeShader = shader;
-		return pass;
-	}
+    [SerializeField] ComputeShader shader;
+    protected override CustomPass<GrayscaleCS> CreatePass(RenderPassEvent renderPassEvent) =>
+        new GrayscaleCSPass(renderPassEvent) { computeShader = shader };
 }
 
 public class GrayscaleCSPass : CustomPass<GrayscaleCS>
 {
-	public override string GetShaderPath() => "GrayscaleCS";
-	public override string renderTag => "Render Grayscale Effects";
+    public ComputeShader computeShader;
+    int kernel2D = -1;
+    int kernelArray = -1;
+    public override string GetShaderPath() => "Hidden/PostProcessing/Grayscale";
+    public override string renderTag => "Render Grayscale Compute Effects";
+    public GrayscaleCSPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
 
-	public GrayscaleCSPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
+    public override void Init(string shaderPath)
+    {
+        base.Init(shaderPath); // Raster fallback also covers missing assets / unsupported devices.
+        if (computeShader == null) computeShader = Resources.Load<ComputeShader>("Shaders/GrayscaleCS");
+        if (computeShader == null || !SystemInfo.supportsComputeShaders) return;
+        if (computeShader.HasKernel("GrayscaleCS")) kernel2D = computeShader.FindKernel("GrayscaleCS");
+        if (computeShader.HasKernel("GrayscaleCSArray")) kernelArray = computeShader.FindKernel("GrayscaleCSArray");
+    }
 
-	static class ShaderPropertyID
-	{
-		internal static readonly int MainTex = Shader.PropertyToID("_MainTex");
-		internal static readonly int Source = Shader.PropertyToID("_SourceTex");
-		internal static readonly int Result = Shader.PropertyToID("_ResultTex");
+    protected override void ConfigureParameters(PostProcessingParameters p, GrayscaleCS c, UniversalCameraData camera) =>
+        p.Float("_Blend", c.blendRate.value);
 
-		internal static readonly int Blend = Shader.PropertyToID("_Blend");
-	}
+    class ComputeData
+    {
+        public TextureHandle source, destination;
+        public ComputeShader shader;
+        public int kernel, groupsX, groupsY, groupsZ, width, height, slices;
+        public bool array;
+        public float blend;
+    }
 
-	public ComputeShader computeShader;
-	string kernelName = "GrayscaleCS";
-	int kernelIndex = -1;
-	public override void Init(string shaderPath)
-	{
-		if (computeShader != null && computeShader.HasKernel(kernelName)) {
-			kernelIndex = computeShader.FindKernel(kernelName);
-		}	
-	}
+    protected override TextureHandle RecordEffect(RenderGraph graph, ContextContainer frameData,
+        TextureHandle source, PostProcessingParameters p, GrayscaleCS component)
+    {
+        var descriptor = graph.GetTextureDesc(source);
+        bool array = descriptor.dimension == TextureDimension.Tex2DArray;
+        int kernel = array ? kernelArray : kernel2D;
+        var format = GraphicsFormat.R16G16B16A16_SFloat;
+        if (computeShader == null || kernel < 0 || !SystemInfo.supportsComputeShaders ||
+            !SystemInfo.IsFormatSupported(format, FormatUsage.LoadStore) ||
+            (descriptor.dimension != TextureDimension.Tex2D && !array))
+        {
+            Warn("fallback", "Compute/UAV support is unavailable; using the raster Grayscale implementation.");
+            return base.RecordEffect(graph, frameData, source, p, component);
+        }
 
-	public override bool IsValid()
-	{
-		return kernelIndex != -1;
-	}
-
-	protected override void Render(CommandBuffer cmd, ref RenderingData renderingData)
-	{
-		var descriptor = renderingData.cameraData.cameraTargetDescriptor;
-		var width = descriptor.width;
-		var height = descriptor.height;
-
-		cmd.GetTemporaryRT(ShaderPropertyID.Result, width, height, 0, FilterMode.Point, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default, 1, true);
-		var rtResult = new RenderTargetIdentifier(ShaderPropertyID.Result);
-
-		cmd.SetComputeTextureParam(computeShader, kernelIndex, ShaderPropertyID.MainTex, source);
-		cmd.SetComputeTextureParam(computeShader, kernelIndex, ShaderPropertyID.Result, rtResult);
-		cmd.SetComputeFloatParam(computeShader, ShaderPropertyID.Blend, volumeComponent.blendRate.value);
-		
-		cmd.DispatchCompute(computeShader, kernelIndex, width, height, 1);
-		cmd.Blit(rtResult, destination);
-
-		cmd.ReleaseTemporaryRT(ShaderPropertyID.Result);
-	}
+        var camera = frameData.Get<UniversalCameraData>().cameraTargetDescriptor;
+        int width = Mathf.Max(1, descriptor.width > 0 ? descriptor.width : camera.width);
+        int height = Mathf.Max(1, descriptor.height > 0 ? descriptor.height : camera.height);
+        int slices = array ? Mathf.Max(1, descriptor.slices) : 1;
+        // Resolve MSAA and normalize the viewport into a fixed-size, linear input.
+        // Compute performs integer loads, unlike raster sampling with RTHandle scaling.
+        var input = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Input", width, height, format);
+        var output = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Output", width, height, format, true);
+        PostProcessingGraph.Copy(graph, source, input, renderTag + " / Resolve");
+        computeShader.GetKernelThreadGroupSizes(kernel, out uint tx, out uint ty, out uint tz);
+        using (var builder = graph.AddComputePass<ComputeData>(renderTag, out var data))
+        {
+            data.source = input; data.destination = output; data.shader = computeShader;
+            data.kernel = kernel; data.array = array; data.blend = component.blendRate.value;
+            data.width = width; data.height = height; data.slices = slices;
+            data.groupsX = (width + (int)tx - 1) / (int)tx;
+            data.groupsY = (height + (int)ty - 1) / (int)ty;
+            data.groupsZ = (slices + (int)tz - 1) / (int)tz;
+            builder.UseTexture(input, AccessFlags.Read);
+            builder.UseTexture(output, AccessFlags.Write);
+            builder.SetRenderFunc((ComputeData pass, ComputeGraphContext context) =>
+            {
+                context.cmd.SetComputeTextureParam(pass.shader, pass.kernel, pass.array ? SourceArray : Source, pass.source);
+                context.cmd.SetComputeTextureParam(pass.shader, pass.kernel, pass.array ? ResultArray : Result, pass.destination);
+                context.cmd.SetComputeFloatParam(pass.shader, Blend, pass.blend);
+                context.cmd.SetComputeVectorParam(pass.shader, Size, new Vector4(pass.width, pass.height, pass.slices, 0));
+                context.cmd.DispatchCompute(pass.shader, pass.kernel, pass.groupsX, pass.groupsY, pass.groupsZ);
+            });
+        }
+        return output;
+    }
+    static readonly int Source = Shader.PropertyToID("_SourceTex");
+    static readonly int Result = Shader.PropertyToID("_ResultTex");
+    static readonly int SourceArray = Shader.PropertyToID("_SourceArray");
+    static readonly int ResultArray = Shader.PropertyToID("_ResultArray");
+    static readonly int Blend = Shader.PropertyToID("_Blend");
+    static readonly int Size = Shader.PropertyToID("_TextureSize");
 }

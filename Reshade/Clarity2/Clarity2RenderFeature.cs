@@ -1,84 +1,63 @@
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
 
 public class Clarity2RenderFeature : CustomRenderFeature<Clarity2>
 {
-	protected override CustomPass<Clarity2> CreatePass(RenderPassEvent renderPassEvent)
-	{
-		return new Clarity2Pass(renderPassEvent);
-	}
+
+    protected override CustomPass<Clarity2> CreatePass(RenderPassEvent renderPassEvent)
+    {
+        return new Clarity2Pass(renderPassEvent);
+    }
 }
 
 public class Clarity2Pass : CustomPass<Clarity2>
 {
-	public override string GetShaderPath() => "Hidden/PostProcessing/Clarity2";
-	public override string renderTag => "Render Clarity2 Effects";
+    public override string GetShaderPath() => "Hidden/PostProcessing/Clarity2";
+    public override string renderTag => "Render Clarity2 Effects";
+    public Clarity2Pass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
 
-	public Clarity2Pass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
+    protected override void ConfigureParameters(PostProcessingParameters p, Clarity2 c, UniversalCameraData camera)
+    {
+        p.Int("_Offset", Mathf.Max(1, c.offset.value));
+        p.Int("_BlendIfDark", c.blendIfDark.value);
+        p.Int("_BlendIfLight", c.blendIfLight.value);
+        p.Float("_BlendIfRange", Mathf.Max(0.0001f, c.blendIfRange.value));
+        p.Float("_Strength", c.strength.value);
+        p.Float("_MaskContrast", c.maskContrast.value);
+        p.Float("_DarkIntensity", c.darkIntensity.value);
+        p.Float("_LightIntensity", c.lightIntensity.value);
+        p.Float("_DitherStrength", c.ditherStrength.value);
+        for (int i = 0; i < radiusKeywords.Length; i++) p.Keyword(radiusKeywords[i], i == Mathf.Clamp(c.radius.value, 0, 4));
+        p.Keyword("BLENDMODE_SOFTLIGHT", c.blendMode.value == Clarity2.BlendMode.SoftLight);
+        p.Keyword("BLENDMODE_OVERLAY", c.blendMode.value == Clarity2.BlendMode.Overlay);
+        p.Keyword("BLENDMODE_HARDLIGHT", c.blendMode.value == Clarity2.BlendMode.HardLight);
+        p.Keyword("BLENDMODE_MULTIPLY", c.blendMode.value == Clarity2.BlendMode.Multiply);
+        p.Keyword("BLENDMODE_VIVIDLIGHT", c.blendMode.value == Clarity2.BlendMode.VividLight);
+        p.Keyword("BLENDMODE_LINEARLIGHT", c.blendMode.value == Clarity2.BlendMode.LinearLight);
+        p.Keyword("BLENDMODE_ADDITION", c.blendMode.value == Clarity2.BlendMode.Addition);
+    }
 
-	static class ShaderPropertyID
-	{
-		internal static readonly int MainTex = Shader.PropertyToID("_MainTex");
-		internal static readonly int Temp1Tex = Shader.PropertyToID("_Temp1Tex");
-		internal static readonly int Temp2Tex = Shader.PropertyToID("_Temp2Tex");
+    static readonly string[] radiusKeywords = { "RADIUS_ZERO", "RADIUS_ONE", "RADIUS_TWO", "RADIUS_THEREE", "RADIUS_FOUR" };
+    protected override TextureHandle RecordEffect(RenderGraph graph, ContextContainer frameData,
+        TextureHandle source, PostProcessingParameters p, Clarity2 component)
+    {
+        var desc = graph.GetTextureDesc(source);
+        var cameraDesc = frameData.Get<UniversalCameraData>().cameraTargetDescriptor;
+        int w = Mathf.Max(1, (desc.width > 0 ? desc.width : cameraDesc.width) / 2);
+        int h = Mathf.Max(1, (desc.height > 0 ? desc.height : cameraDesc.height) / 2);
+        var format = UnityEngine.Experimental.Rendering.GraphicsFormat.R16G16B16A16_SFloat;
+        var down = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Downsample", w, h, format);
+        var vertical = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Vertical", w, h, format);
+        var horizontal = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Horizontal", w, h, format);
+        var output = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Output");
+        PostProcessingGraph.Draw(graph, source, down, material, p, 0, renderTag + " / Downsample");
+        PostProcessingGraph.Draw(graph, down, vertical, material, p, 1, renderTag + " / Vertical");
+        PostProcessingGraph.Draw(graph, vertical, horizontal, material, p, 2, renderTag + " / Horizontal");
+        PostProcessingGraph.Draw(graph, source, output, material, p, 3, renderTag + " / Composite",
+            horizontal, PostProcessingParameters.Id("_Temp1Tex"));
+        return output;
+    }
 
-		internal static readonly int Offset = Shader.PropertyToID("_Offset");
-		internal static readonly int BlendIfDark = Shader.PropertyToID("_BlendIfDark");
-		internal static readonly int BlendIfLight = Shader.PropertyToID("_BlendIfLight");
-		internal static readonly int BlendIfRange = Shader.PropertyToID("_BlendIfRange");
-		internal static readonly int Strength = Shader.PropertyToID("_Strength");
-		internal static readonly int MaskContrast = Shader.PropertyToID("_MaskContrast");
-		internal static readonly int DarkIntensity = Shader.PropertyToID("_DarkIntensity");
-		internal static readonly int LightIntensity = Shader.PropertyToID("_LightIntensity");
-		internal static readonly int DitherStrength = Shader.PropertyToID("_DitherStrength");
-	}
-
-	protected override void Render(CommandBuffer cmd, ref RenderingData renderingData)
-	{
-		var descriptor = renderingData.cameraData.cameraTargetDescriptor;
-
-		material.SetInt(ShaderPropertyID.Offset, volumeComponent.offset.value);
-		material.SetInt(ShaderPropertyID.BlendIfDark, volumeComponent.blendIfDark.value);
-		material.SetInt(ShaderPropertyID.BlendIfLight, volumeComponent.blendIfLight.value);
-		material.SetFloat(ShaderPropertyID.BlendIfRange, volumeComponent.blendIfRange.value);
-		material.SetFloat(ShaderPropertyID.Strength, volumeComponent.strength.value);
-		material.SetFloat(ShaderPropertyID.MaskContrast, volumeComponent.maskContrast.value);
-		material.SetFloat(ShaderPropertyID.DarkIntensity, volumeComponent.darkIntensity.value);
-		material.SetFloat(ShaderPropertyID.LightIntensity, volumeComponent.lightIntensity.value);
-		material.SetFloat(ShaderPropertyID.DitherStrength, volumeComponent.ditherStrength.value);
-
-		switch (volumeComponent.radius.value) {
-			case 0: material.EnableKeyword("RADIUS_ZERO"); break;
-			case 1: material.EnableKeyword("RADIUS_ONE"); break;
-			case 2: material.EnableKeyword("RADIUS_TWO"); break;
-			case 3: material.EnableKeyword("RADIUS_THEREE"); break;
-			case 4: material.EnableKeyword("RADIUS_FOUR"); break;
-		}
-
-		switch (volumeComponent.blendMode.value) {
-			case Clarity2.BlendMode.SoftLight: material.EnableKeyword("BLENDMODE_SOFTLIGHT"); break;
-			case Clarity2.BlendMode.Overlay: material.EnableKeyword("BLENDMODE_OVERLAY"); break;
-			case Clarity2.BlendMode.HardLight: material.EnableKeyword("BLENDMODE_HARDLIGHT"); break;
-			case Clarity2.BlendMode.Multiply: material.EnableKeyword("BLENDMODE_MULTIPLY"); break;
-			case Clarity2.BlendMode.VividLight: material.EnableKeyword("BLENDMODE_VIVIDLIGHT"); break;
-			case Clarity2.BlendMode.LinearLight: material.EnableKeyword("BLENDMODE_LINEARLIGHT"); break;
-			case Clarity2.BlendMode.Addition: material.EnableKeyword("BLENDMODE_ADDITION"); break;
-		}
-
-		cmd.SetGlobalTexture(ShaderPropertyID.MainTex, source);
-		cmd.GetTemporaryRT(ShaderPropertyID.Temp1Tex, descriptor.width / 2, descriptor.height / 2, 0, FilterMode.Point, RenderTextureFormat.ARGB32);
-		cmd.GetTemporaryRT(ShaderPropertyID.Temp2Tex, descriptor.width / 2, descriptor.height / 2, 0, FilterMode.Point, RenderTextureFormat.ARGB32);
-		var temp1 = new RenderTargetIdentifier(ShaderPropertyID.Temp1Tex);
-		var temp2 = new RenderTargetIdentifier(ShaderPropertyID.Temp2Tex);
-		cmd.SetGlobalTexture(ShaderPropertyID.Temp1Tex, temp1);
-		cmd.SetGlobalTexture(ShaderPropertyID.Temp2Tex, temp2);
-		cmd.Blit(source, temp1, material, 0);
-		cmd.Blit(temp1, temp2, material, 1);
-		cmd.Blit(temp2, temp1, material, 2);
-		cmd.Blit(source, destination, material, 3);
-
-		cmd.ReleaseTemporaryRT(ShaderPropertyID.Temp1Tex);
-		cmd.ReleaseTemporaryRT(ShaderPropertyID.Temp2Tex);
-	}
 }

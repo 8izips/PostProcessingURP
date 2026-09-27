@@ -1,77 +1,44 @@
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
 
 public class ContourRenderFeature : CustomRenderFeature<Contour>
 {
-	protected override CustomPass<Contour> CreatePass(RenderPassEvent renderPassEvent)
-	{
-		return new ContourPass(renderPassEvent);
-	}
+
+    protected override CustomPass<Contour> CreatePass(RenderPassEvent renderPassEvent)
+    {
+        return new ContourPass(renderPassEvent);
+    }
 }
 
 public class ContourPass : CustomPass<Contour>
 {
-	public override string GetShaderPath() => "Hidden/PostProcessing/Contour";
-	public override string renderTag => "Render Contour Effects";
+    public override string GetShaderPath() => "Hidden/PostProcessing/Contour";
+    public override string renderTag => "Render Contour Effects";
+    public ContourPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
 
-	public ContourPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
+    protected override void ConfigureParameters(PostProcessingParameters p, Contour c, UniversalCameraData camera)
+    {
+        p.Color("_Color", c.lineColor.value);
+        p.Color("_Background", c.bgColor.value);
+        p.Float("_Threshold", c.lowerThreshold.value);
+        p.Float("_InvRange", 1f / Mathf.Max(0.0001f, c.upperThreshold.value - c.lowerThreshold.value));
+        p.Float("_ColorSensitivity", c.colorSensitivity.value);
+        p.Float("_DepthSensitivity", c.depthSensitivity.value * 2f);
+        p.Float("_NormalSensitivity", c.normalSensitivity.value);
+        p.Float("_InvFallOff", 1f / Mathf.Max(0.0001f, c.falloffDepth.value));
+        p.Keyword("_CONTOUR_COLOR", c.colorSensitivity.value > 0);
+        p.Keyword("_CONTOUR_DEPTH", c.depthSensitivity.value > 0);
+        p.Keyword("_CONTOUR_NORMAL", c.normalSensitivity.value > 0);
+    }
 
-	static class ShaderPropertyID
-	{
-		internal static readonly int MainTex = Shader.PropertyToID("_MainTex");
-		
-		internal static readonly int Color = Shader.PropertyToID("_Color");
-		internal static readonly int Background = Shader.PropertyToID("_Background");
-		internal static readonly int Threshold = Shader.PropertyToID("_Threshold");
-		internal static readonly int InvRange = Shader.PropertyToID("_InvRange");
-		internal static readonly int ColorSensitivity = Shader.PropertyToID("_ColorSensitivity");
-		internal static readonly int DepthSensitivity = Shader.PropertyToID("_DepthSensitivity");
-		internal static readonly int NormalSensitivity = Shader.PropertyToID("_NormalSensitivity");
-		internal static readonly int InvFallOff = Shader.PropertyToID("_InvFallOff");
-	}
+    public override ScriptableRenderPassInput GetInputRequirements(Contour c)
+    {
+        var input = ScriptableRenderPassInput.None;
+        if (c.depthSensitivity.value > 0) input |= ScriptableRenderPassInput.Depth;
+        if (c.normalSensitivity.value > 0) input |= ScriptableRenderPassInput.Normal;
+        return input;
+    }
 
-	public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData)
-	{
-		base.OnCameraSetup(cmd, ref renderingData);
-
-		if (volumeComponent != null) {
-			if (volumeComponent.normalSensitivity.value > 0f) {
-				ConfigureInput(ScriptableRenderPassInput.Normal);
-			}
-			else if (volumeComponent.depthSensitivity.value > 0f) {
-				ConfigureInput(ScriptableRenderPassInput.Depth);
-			}
-		}
-	}
-
-	protected override void Render(CommandBuffer cmd, ref RenderingData renderingData)
-	{
-		material.SetColor(ShaderPropertyID.Color, volumeComponent.lineColor.value);
-		material.SetColor(ShaderPropertyID.Background, volumeComponent.bgColor.value);
-		material.SetFloat(ShaderPropertyID.Threshold, volumeComponent.lowerThreshold.value);
-		material.SetFloat(ShaderPropertyID.InvRange, 1 / (volumeComponent.upperThreshold.value - volumeComponent.lowerThreshold.value));
-		material.SetFloat(ShaderPropertyID.ColorSensitivity, volumeComponent.colorSensitivity.value);
-		material.SetFloat(ShaderPropertyID.DepthSensitivity, volumeComponent.depthSensitivity.value * 2f);
-		material.SetFloat(ShaderPropertyID.NormalSensitivity, volumeComponent.normalSensitivity.value);
-		material.SetFloat(ShaderPropertyID.InvFallOff, 1 / volumeComponent.falloffDepth.value);
-
-		if (volumeComponent.colorSensitivity.value > 0f)
-			material.EnableKeyword("_CONTOUR_COLOR");
-		else
-			material.DisableKeyword("_CONTOUR_COLOR");
-
-		if (volumeComponent.depthSensitivity.value > 0f)
-			material.EnableKeyword("_CONTOUR_DEPTH");
-		else
-			material.DisableKeyword("_CONTOUR_DEPTH");
-
-		if (volumeComponent.normalSensitivity.value > 0f)
-			material.EnableKeyword("_CONTOUR_NORMAL");
-		else
-			material.DisableKeyword("_CONTOUR_NORMAL");
-
-		cmd.SetGlobalTexture(ShaderPropertyID.MainTex, source);
-		cmd.Blit(source, destination, material);
-	}
 }

@@ -1,98 +1,66 @@
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
 
 public class StreakRenderFeature : CustomRenderFeature<Streak>
 {
-	protected override CustomPass<Streak> CreatePass(RenderPassEvent renderPassEvent)
-	{
-		return new StreakPass(renderPassEvent);
-	}
+
+    protected override CustomPass<Streak> CreatePass(RenderPassEvent renderPassEvent)
+    {
+        return new StreakPass(renderPassEvent);
+    }
 }
 
 public class StreakPass : CustomPass<Streak>
 {
-	public override string GetShaderPath() => "Hidden/PostProcessing/Streak";
-	public override string renderTag => "Render Streak Effects";
+    public override string GetShaderPath() => "Hidden/PostProcessing/Streak";
+    public override string renderTag => "Render Streak Effects";
+    public StreakPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) { }
 
-	const int MaxMipLevel = 16;
-	int[] _mipWidth;
-	int[] _rtMipDown;
-	int[] _rtMipUp;
-	public StreakPass(RenderPassEvent renderPassEvent) : base(renderPassEvent) {
-		_mipWidth = new int[MaxMipLevel];
-		_rtMipDown = new int[MaxMipLevel];
-		_rtMipUp = new int[MaxMipLevel];
+    protected override void ConfigureParameters(PostProcessingParameters p, Streak c, UniversalCameraData camera)
+    {
+        p.Float("_Threshold", c.threshold.value);
+        p.Float("_Stretch", c.stretch.value);
+        p.Float("_Intensity", c.intensity.value);
+        p.Color("_Color", c.tint.value);
+    }
 
-		for (var i = 0; i < MaxMipLevel; i++) {
-			_rtMipDown[i] = Shader.PropertyToID("_MipDown" + i);
-			_rtMipUp[i] = Shader.PropertyToID("_MipUp" + i);
-		}
-	}
+    protected override TextureHandle RecordEffect(RenderGraph graph, ContextContainer frameData,
+        TextureHandle source, PostProcessingParameters p, Streak component)
+    {
+        var desc = graph.GetTextureDesc(source);
+        var cameraDesc = frameData.Get<UniversalCameraData>().cameraTargetDescriptor;
+        int width = Mathf.Max(1, desc.width > 0 ? desc.width : cameraDesc.width);
+        int height = Mathf.Max(1, (desc.height > 0 ? desc.height : cameraDesc.height) / 2);
+        var format = UnityEngine.Experimental.Rendering.GraphicsFormat.R16G16B16A16_SFloat;
+        var levels = new TextureHandle[16];
+        var widths = new int[16];
+        widths[0] = width;
+        levels[0] = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Prefilter", width, height, format);
+        PostProcessingGraph.Draw(graph, source, levels[0], material, p, 0, renderTag + " / Prefilter");
+        int count = 1;
+        while (count < levels.Length && width / 2 > 7)
+        {
+            width /= 2;
+            widths[count] = width;
+            levels[count] = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Down " + count, width, height, format);
+            PostProcessingGraph.Draw(graph, levels[count - 1], levels[count], material, p, 1, renderTag + " / Down " + count);
+            count++;
+        }
+        var last = levels[count - 1];
+        for (int i = count - 2; i >= 1; i--)
+        {
+            var up = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Up " + i, widths[i], height, format);
+            PostProcessingGraph.Draw(graph, last, up, material, p, 2, renderTag + " / Up " + i,
+                levels[i], PostProcessingParameters.Id("_HighTex"));
+            last = up;
+        }
+        var output = PostProcessingGraph.CreateColor(graph, source, renderTag + " / Output");
+        PostProcessingGraph.Draw(graph, last, output, material, p, 3, renderTag + " / Composite",
+            source, PostProcessingParameters.Id("_HighTex"));
+        // RenderGraph owns every transient level and frees it after its last reader.
+        return output;
+    }
 
-	static class ShaderPropertyID
-	{
-		internal static readonly int MainTex = Shader.PropertyToID("_MainTex");
-		internal static readonly int HighTex = Shader.PropertyToID("_HighTex");
-
-		internal static readonly int Threshold = Shader.PropertyToID("_Threshold");
-		internal static readonly int Stretch = Shader.PropertyToID("_Stretch");
-		internal static readonly int Intensity = Shader.PropertyToID("_Intensity");
-		internal static readonly int Color = Shader.PropertyToID("_Color");
-	}
-
-	protected override void Render(CommandBuffer cmd, ref RenderingData renderingData)
-	{
-		ref var cameraData = ref renderingData.cameraData;
-		var w = cameraData.camera.scaledPixelWidth;
-		var h = cameraData.camera.scaledPixelHeight;
-
-		material.SetFloat(ShaderPropertyID.Threshold, volumeComponent.threshold.value);
-		material.SetFloat(ShaderPropertyID.Stretch, volumeComponent.stretch.value);
-		material.SetFloat(ShaderPropertyID.Intensity, volumeComponent.intensity.value);
-		material.SetColor(ShaderPropertyID.Color, volumeComponent.tint.value);
-
-		// Calculate the mip widths.
-		_mipWidth[0] = w;
-		for (var i = 1; i < MaxMipLevel; i++)
-			_mipWidth[i] = _mipWidth[i - 1] / 2;
-
-		// Apply the prefilter and store into MIP 0.
-		var height = h / 2;
-		cmd.SetGlobalTexture(ShaderPropertyID.MainTex, source);
-		cmd.GetTemporaryRT(_rtMipDown[0], _mipWidth[0], height, 0, FilterMode.Bilinear, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Default);
-		cmd.Blit(source, _rtMipDown[0], material, 0);
-
-		// Build the MIP pyramid.
-		var level = 1;
-		for (; level < MaxMipLevel && _mipWidth[level] > 7; level++) {
-			cmd.GetTemporaryRT(_rtMipDown[level], _mipWidth[level], height, 0, FilterMode.Bilinear, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Default);
-			cmd.SetGlobalTexture(ShaderPropertyID.MainTex, _rtMipDown[level - 1]);
-			cmd.Blit(_rtMipDown[level - 1], _rtMipDown[level], material, 1);
-		}
-		// MIP 0 is not needed at this point.
-		cmd.ReleaseTemporaryRT(_rtMipDown[level]);
-
-		// Upsample and combine.
-		var lastRT = _rtMipDown[--level];
-		for (level--; level >= 1; level--) {
-			cmd.GetTemporaryRT(_rtMipUp[level], _mipWidth[level], height, 0, FilterMode.Bilinear, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Default);
-			cmd.SetGlobalTexture(ShaderPropertyID.MainTex, lastRT);
-			cmd.SetGlobalTexture(ShaderPropertyID.HighTex, _rtMipDown[level]);
-			cmd.Blit(lastRT, _rtMipUp[level], material, 2);
-
-			cmd.ReleaseTemporaryRT(_rtMipDown[level]);
-			cmd.ReleaseTemporaryRT(lastRT);
-
-			lastRT = _rtMipUp[level];
-		}
-
-		// Final composition.
-		cmd.SetGlobalTexture(ShaderPropertyID.MainTex, lastRT);
-		cmd.SetGlobalTexture(ShaderPropertyID.HighTex, source);		
-		cmd.Blit(lastRT, destination, material, 3);
-
-		cmd.ReleaseTemporaryRT(lastRT);
-		cmd.EndSample("Streak");
-	}
 }
